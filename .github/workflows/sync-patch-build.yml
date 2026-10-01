@@ -1,4 +1,4 @@
-name: sync-upstream
+name: sync-patch-build
 
 # 上游 account-password-helper 每次发版，自动嵌入 PassFiller 功能并重新打包发布。
 # 失败策略：补丁失配 / typecheck / test / build 任一失败即红，并自动开 issue 提示修复。
