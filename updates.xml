@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+  <app appid='cnilidgicplcaidpmpbnbpipciefipmj'>
+    <updatecheck codebase='https://github.com/lakevilladom/passfiller/releases/download/v3.13.1-pf1/PassFiller-v3.13.1.1.crx' version='3.13.1.1'/>
+  </app>
+</gupdate>
