@@ -1,0 +1,19 @@
+diff --git a/components/options/HeaderBar.vue b/components/options/HeaderBar.vue
+index a757ef6..697c70a 100644
+--- a/components/options/HeaderBar.vue
++++ b/components/options/HeaderBar.vue
+@@ -227,6 +227,14 @@
+               >
+                 {{ t('options.header.shortcuts') }}
+               </el-dropdown-item>
++              <!-- [PassFiller] MCP 外部凭据源设置入口：独立设置页（专有名词，无需 i18n） -->
++              <el-dropdown-item>
++                <a
++                  href="/passfiller-options.html"
++                  target="_blank"
++                  rel="noopener noreferrer"
++                >PassFiller</a>
++              </el-dropdown-item>
+             </el-dropdown-menu>
+           </template>
+         </el-dropdown>

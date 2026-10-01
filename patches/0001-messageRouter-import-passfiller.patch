@@ -1,0 +1,22 @@
+diff --git a/entrypoints/background/messageRouter.ts b/entrypoints/background/messageRouter.ts
+index 9eb85c6..2f5076a 100644
+--- a/entrypoints/background/messageRouter.ts
++++ b/entrypoints/background/messageRouter.ts
+@@ -14,14 +14,15 @@ import {
+   getCachedSortConfig,
+   warmPasswordCache,
+   getOrWarmCache,
+-  getMatchingAccounts,
+-  getDecryptedEntryById,
+   getInlineTotpCode,
+   recordPendingTotpIfEligible,
+   consumePendingTotp,
+   clearPendingTotp,
+   grantCredentialAccessAfterStartupRelock,
+ } from './passwordCache';
++// [PassFiller] MCP 外部凭据源：getMatchingAccounts / getDecryptedEntryById 经门面改道
++// （本地 vault 与 MCP 条目合并供给；mcp: 前缀条目委托外部服务解密），调用点零改动
++import { getMatchingAccounts, getDecryptedEntryById } from '@/passfiller';
+ import { handleAutoSavePassword, handleCheckCredentialStatus } from './autoSaveHandler';
+ import { issuePendingCipherKey } from './pendingCipherKeyStore';
+ import { handleQuickAddPassword } from './quickAddHandler';

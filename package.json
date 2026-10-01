@@ -1,0 +1,18 @@
+{
+  "name": "passfiller",
+  "private": true,
+  "version": "0.0.0",
+  "description": "PassFiller 补丁库：每次上游 account-password-helper 发版，自动嵌入 MCP 外部凭据源功能并重新打包（GitHub Actions）",
+  "type": "module",
+  "packageManager": "pnpm@10.12.1",
+  "engines": {
+    "node": ">=20.15"
+  },
+  "scripts": {
+    "materialize": "node scripts/apply.js --materialize",
+    "gen-patches": "node scripts/gen-patches.js",
+    "postprocess": "node scripts/postprocess.js",
+    "package": "node scripts/package-artifacts.js",
+    "render": "node scripts/render-template.js"
+  }
+}

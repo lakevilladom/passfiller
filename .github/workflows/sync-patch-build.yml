@@ -1,0 +1,206 @@
+name: sync-upstream
+
+# 上游 account-password-helper 每次发版，自动嵌入 PassFiller 功能并重新打包发布。
+# 失败策略：补丁失配 / typecheck / test / build 任一失败即红，并自动开 issue 提示修复。
+
+on:
+  schedule:
+    - cron: '17 */6 * * *' # 每 6 小时轮询上游 release（:17 错开整点高峰）
+  workflow_dispatch: # 手动触发：即使该版本已处理过也强制重新发布（pf 迭代号 +1）
+
+permissions:
+  contents: write
+  issues: write
+  pages: write # 用于自动开启 Pages（POST /repos/<repo>/pages）
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: liaolongdong/account-password-helper
+  # 扩展 ID 由 Secrets.CRX_PRIVATE_KEY 的公钥实时派生（算法见 scripts/package-artifacts.js）
+  # 私钥未配置时仅发布 zip；配置后额外产出 .crx 并部署 updates.xml 到 GitHub Pages
+
+jobs:
+  # ── 判定：上游最新版本 + 是否需要处理 + pf 迭代号 ──────────────────────
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      pf: ${{ steps.iter.outputs.pf }}
+      skip: ${{ steps.iter.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream latest release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "upstream: $TAG"
+
+      # 已处理标记 = 本仓库自有 tag v{上游版本}-pf*；手动触发时强制重新发布
+      - name: Determine pf iteration
+        id: iter
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.resolve.outputs.version }}
+          N=$(git ls-remote --tags origin "refs/tags/v${VERSION}-pf*" | grep -c . || true)
+          if [ "$N" -gt 0 ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "pf=$((N + 1))" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── 构建发布：组装 → 验证 → 打包 → Release + Pages ────────────────────
+  build:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_TAG: ${{ needs.check.outputs.tag }}
+      PF_VERSION: ${{ needs.check.outputs.version }}.${{ needs.check.outputs.pf }}
+      PF_TAG: v${{ needs.check.outputs.version }}-pf${{ needs.check.outputs.pf }}
+      UPDATE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/updates.xml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone upstream source at tag
+        run: git clone --depth 1 --branch "$UPSTREAM_TAG" "https://github.com/$UPSTREAM_REPO.git" upstream-src
+
+      - uses: pnpm/action-setup@v4 # 版本取自根 package.json 的 packageManager（须与上游对齐）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: upstream-src/pnpm-lock.yaml
+
+      - name: Assemble (upstream + overlay + patches)
+        run: node scripts/apply.js --src upstream-src --out assembled
+
+      - name: Install dependencies
+        working-directory: assembled
+        env:
+          HUSKY: '0' # 跳过上游 prepare 钩子（组装树不是 git 仓库）
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify (typecheck + test)
+        working-directory: assembled
+        run: |
+          pnpm typecheck
+          pnpm test:run
+
+      - name: Build extension
+        working-directory: assembled
+        run: pnpm exec wxt build
+
+      # update_url 注入 manifest（企业策略/crx 安装场景的自动更新入口；unpacked 场景无害）
+      - name: Postprocess manifest
+        working-directory: assembled
+        run: node ../scripts/postprocess.js --out .output/chrome-mv3 --version "$PF_VERSION" --update-url "$UPDATE_URL"
+
+      # 自研打包（wxt zip 会隐式 rebuild，覆盖 postprocess 注入的 manifest）
+      - name: Package zip
+        working-directory: assembled
+        run: node ../scripts/package-artifacts.js --dir .output/chrome-mv3 --zip "../PassFiller-v${PF_VERSION}-chrome.zip"
+
+      # crx 签名与 updates.xml 强耦合（清单指向 Release 的 crx 资产），无私钥则一并跳过。
+      # 私钥落盘在 workspace 之外的 $RUNNER_TEMP，用完即删
+      - name: Package CRX and render updates.xml
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CRX_PRIVATE_KEY" ]; then
+            echo "未配置 secrets.CRX_PRIVATE_KEY，跳过 crx 与 updates.xml（仅发布 zip）"
+            exit 0
+          fi
+          KEY="$RUNNER_TEMP/crx-private.pem"
+          printf '%s\n' "$CRX_PRIVATE_KEY" > "$KEY"
+          export CRX_KEY_PATH="$KEY"
+          # 从私钥公钥派生扩展 ID（算法同 package-artifacts.js）
+          APP_ID=$(node -e 'const{createHash,createPublicKey}=require("node:crypto"),fs=require("fs");const k=createPublicKey(fs.readFileSync(process.env.CRX_KEY_PATH));const d=createHash("sha256").update(k.export({type:"spki",format:"der"})).digest().subarray(0,16);process.stdout.write([...d].flatMap(b=>["abcdefghijklmnop"[b>>4],"abcdefghijklmnop"[b&0xf]]).join(""))')
+          echo "PF_APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          node scripts/package-artifacts.js --dir assembled/.output/chrome-mv3 \
+            --crx "PassFiller-v${PF_VERSION}.crx" --key "$KEY" --appid "$APP_ID"
+          rm -f "$KEY"
+          mkdir -p pages
+          # codebase 指向本 Release 资产（Chrome updater 可跟随 302）
+          node scripts/render-template.js \
+            --template templates/updates.xml \
+            --output pages/updates.xml \
+            --var APP_ID="$APP_ID" \
+            --var VERSION="$PF_VERSION" \
+            --var "CODEBASE_URL=https://github.com/${{ github.repository }}/releases/download/${PF_TAG}/PassFiller-v${PF_VERSION}.crx"
+
+      - name: Deploy updates.xml to GitHub Pages
+        if: hashFiles('pages/updates.xml') != ''
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ github.token }}
+          publish_branch: gh-pages
+          publish_dir: pages
+
+      # 自动开启 Pages：首次把 Source 设为 gh-pages；已存在返回 409 则忽略
+      - name: Enable GitHub Pages (auto)
+        if: hashFiles('pages/updates.xml') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/${{ github.repository }}/pages" \
+            --input - <<'JSON' || echo "Pages 已启用或已存在（409 可忽略）"
+          {
+            "build_type": "legacy",
+            "source": { "branch": "gh-pages", "path": "/" }
+          }
+          JSON
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ASSETS=("PassFiller-v${PF_VERSION}-chrome.zip")
+          [ -f "PassFiller-v${PF_VERSION}.crx" ] && ASSETS+=("PassFiller-v${PF_VERSION}.crx")
+          # 渲染 release notes 模板
+          node scripts/render-template.js \
+            --template templates/release-notes.md \
+            --output release-notes.md \
+            --var UPSTREAM_TAG="$UPSTREAM_TAG" \
+            --var UPSTREAM_REPO="$UPSTREAM_REPO" \
+            --var VERSION="$PF_VERSION" \
+            --var APP_ID="$PF_APP_ID" \
+            --var UPDATE_URL="$UPDATE_URL"
+          gh release create "$PF_TAG" "${ASSETS[@]}" \
+            --title "PassFiller ${PF_VERSION}" \
+            --notes-file release-notes.md
+
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TITLE="上游 ${UPSTREAM_TAG} 组装失败，需要人工适配"
+          # 查重：同一版本只开一个失败 issue
+          if gh issue list --state open --search "in:title ${TITLE}" | grep -q .; then
+            echo "已有同版本失败 issue，跳过"
+            exit 0
+          fi
+          # 渲染失败 issue 模板
+          node scripts/render-template.js \
+            --template templates/failure-issue.md \
+            --output failure-issue.md \
+            --var UPSTREAM_TAG="$UPSTREAM_TAG" \
+            --var UPSTREAM_REPO="$UPSTREAM_REPO" \
+            --var "FAILURE_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh issue create --title "$TITLE" --body-file failure-issue.md || \
+            echo "issue 创建失败（可能已存在），忽略"
