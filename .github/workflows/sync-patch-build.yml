@@ -1,7 +1,7 @@
 name: sync-patch-build
 
 # 上游 account-password-helper 每次发版，自动嵌入 PassFiller 功能并重新打包发布。
-# 失败策略：补丁失配 / typecheck / test / build 任一失败即红，并自动开 issue 提示修复。
+# 失败策略：补丁失配 / typecheck / test / build 任一失败即红，需人工排查。
 
 on:
   schedule:
@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
   pages: write # 用于自动开启 Pages（POST /repos/<repo>/pages）
 
 concurrency:
@@ -32,7 +31,7 @@ jobs:
       pf: ${{ steps.iter.outputs.pf }}
       skip: ${{ steps.iter.outputs.skip }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve upstream latest release
         id: resolve
@@ -70,13 +69,37 @@ jobs:
       PF_TAG: v${{ needs.check.outputs.version }}-pf${{ needs.check.outputs.pf }}
       UPDATE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/updates.xml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Check CRX signing key configured
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CRX_PRIVATE_KEY" ]; then
+            echo "::warning::secrets.CRX_PRIVATE_KEY 未配置 —— 本次仅发布 zip，不生成 .crx，自动更新（crx 路径）不可用。"
+            {
+              echo "## ⚠️ 未配置 CRX 签名私钥"
+              echo ""
+              echo "本次发布仅有 \`zip\`（开发者模式手动加载），**不会生成 \`.crx\` 自动更新包**，企业策略静默更新不可用。"
+              echo ""
+              echo "如需自动更新，请按仓库 README「首次配置」生成 RSA-2048 / PEM·PKCS#1 私钥并存入 Secret："
+              echo ""
+              echo "1. \`ssh-keygen -t rsa -b 2048 -m PEM -f crx-private.pem -N \"\"\`"
+              echo "2. 仓库 → Settings → Secrets and variables → Actions → New repository secret"
+              echo "   - Name: \`CRX_PRIVATE_KEY\`"
+              echo "   - Secret: 粘贴 \`crx-private.pem\` 全文（含 BEGIN/END 头尾与换行）"
+              echo "3. \`rm crx-private.pem\`（请另存一份离线备份）"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "CRX_PRIVATE_KEY 已配置，将生成 .crx 并部署 updates.xml（自动更新可用）"
+          fi
 
       - name: Clone upstream source at tag
         run: git clone --depth 1 --branch "$UPSTREAM_TAG" "https://github.com/$UPSTREAM_REPO.git" upstream-src
 
-      - uses: pnpm/action-setup@v4 # 版本取自根 package.json 的 packageManager（须与上游对齐）
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v5 # 版本取自根 package.json 的 packageManager（须与上游对齐）
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -182,25 +205,3 @@ jobs:
           gh release create "$PF_TAG" "${ASSETS[@]}" \
             --title "PassFiller ${PF_VERSION}" \
             --notes-file release-notes.md
-
-      - name: Open issue on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TITLE="上游 ${UPSTREAM_TAG} 组装失败，需要人工适配"
-          # 查重：同一版本只开一个失败 issue
-          if gh issue list --state open --search "in:title ${TITLE}" | grep -q .; then
-            echo "已有同版本失败 issue，跳过"
-            exit 0
-          fi
-          # 渲染失败 issue 模板
-          node scripts/render-template.js \
-            --template templates/failure-issue.md \
-            --output failure-issue.md \
-            --var UPSTREAM_TAG="$UPSTREAM_TAG" \
-            --var UPSTREAM_REPO="$UPSTREAM_REPO" \
-            --var "FAILURE_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh issue create --title "$TITLE" --body-file failure-issue.md || \
-            echo "issue 创建失败（可能已存在），忽略"

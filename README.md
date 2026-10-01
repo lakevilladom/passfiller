@@ -13,7 +13,7 @@
 | `overlay/` | PassFiller 功能代码（**纯新增文件**，组装时整棵复制进上游树，零冲突） |
 | `patches/` | 对上游的全部改动：**仅 2 个补丁 / 2 个文件 / 2 个 hunk** |
 | `scripts/` | 工具链（CI 与本地共用同一入口） |
-| `templates/` | CI 内容模板：`updates.xml` / `release-notes.md` / `failure-issue.md`（用 `{{KEY}}` 占位，由 `render-template.js` 渲染） |
+| `templates/` | CI 内容模板：`updates.xml` / `release-notes.md`（用 `{{KEY}}` 占位，由 `render-template.js` 渲染） |
 | `.github/workflows/sync-patch-build.yml` | 每 6h 轮询上游 + 手动触发；全链路验证后发布 |
 
 ### overlay/
@@ -73,7 +73,7 @@ node ../scripts/package-artifacts.js --dir .output/chrome-mv3 --zip out.zip --cr
 
 ### 补丁失配（上游重构锚点文件）
 
-1. CI 变红并自动开 issue
+1. CI 变红（失败步骤在 Actions 运行页可见）
 2. 本地 `apply.js --out build/work` 失配退出 → 手工修复 `build/work` 中对应文件
 3. `node scripts/gen-patches.js --work build/work --upstream <上游>` 重新生成补丁
 4. 重跑组装/构建验证后提交
@@ -82,15 +82,27 @@ node ../scripts/package-artifacts.js --dir .output/chrome-mv3 --zip out.zip --cr
 
 ### 首次配置
 
-1. 生成 RSA 2048 / PEM·PKCS#1 私钥，**全文存入仓库 Secrets → `CRX_PRIVATE_KEY`**（这是 CI 签名的唯一密钥来源），并自行保留一份离线备份（丢失 = 扩展 ID 变更 = 自动更新链断裂）：
+1. 生成 RSA 2048 / PEM·PKCS#1 私钥：
    ```bash
-   ssh-keygen -t rsa -b 2048 -m PEM -f crx-private.pem -N ""    # 生成后把文件全文贴进 Secrets.CRX_PRIVATE_KEY，再删掉本地副本
+   ssh-keygen -t rsa -b 2048 -m PEM -f crx-private.pem -N ""
+   ```
+2. 将私钥存入仓库 Secrets（CI 签名的唯一密钥来源）：
+   - 仓库页面 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+   - **Name**：`CRX_PRIVATE_KEY`
+   - **Secret**：粘贴 `crx-private.pem` 的**全文**（含 `-----BEGIN RSA PRIVATE KEY-----` 与 `-----END RSA PRIVATE KEY-----` 及中间所有内容与换行）
+   - 点击 **Add secret**
+3. 删除本地私钥副本（密钥已入库 + 请另存一份**离线备份**；丢失 = 扩展 ID 变更 = 自动更新链断裂）：
+   ```bash
+   rm crx-private.pem
    ```
 
-### 更换密钥
-按照上面重新生成私钥，然后更改 Secrets 里的 `CRX_PRIVATE_KEY` 一个 Secret 即可。
+> 扩展 ID 不写死：构建时由 `CRX_PRIVATE_KEY` 的公钥实时派生，自动注入 `updates.xml` 与 release notes。
 
-   >  **换更密钥的风险**：Chrome 自托管 crx 的扩展 ID 由公钥决定，换密钥 = 扩展 ID 改变 = 已安装老用户的自动更新链断裂（`updates.xml` 里的 appid 与老扩展对不上）。需当作「新扩展」迁移：通知用户重装，或企业侧更新 `ExtensionInstallForcelist` 的 appid 后用新 id 重新推送。旧 Release 里的旧 crx 仍可用，但与新 `updates.xml` 互不关联。
+### 更换密钥
+
+重新执行「首次配置」第 1–2 步生成新密钥并**更新**同一个 Secret `CRX_PRIVATE_KEY`（覆盖旧值）即可，其余全自动产生。
+
+   >  **更换密钥的风险**：Chrome 自托管 crx 的扩展 ID 由公钥决定，换密钥 = 扩展 ID 改变 = 已安装老用户的自动更新链断裂（`updates.xml` 里的 appid 与老扩展对不上）。需当作「新扩展」迁移：通知用户重装，或企业侧更新 `ExtensionInstallForcelist` 的 appid 后用新 id 重新推送。旧 Release 里的旧 crx 仍可用，但与新 `updates.xml` 互不关联。
 ### 产物
 
 - `PassFiller-v{版本}-chrome.zip`：开发者模式「加载已解压的扩展程序」
@@ -103,7 +115,7 @@ node ../scripts/package-artifacts.js --dir .output/chrome-mv3 --zip out.zip --cr
 
 ### CI 流程（sync-patch-build.yml）
 
-`gh api` 查上游 latest → 以自有 tag `v{上游版本}-pf*` 判重 → clone 上游@tag → 组装 → `pnpm install/typecheck/test/build` → postprocess → zip+crx → 渲染 `templates/` 模板（updates.xml / release notes）→ `gh release create` → 部署 `updates.xml` 到 gh-pages。任一步失败即红并自动开 issue。
+`gh api` 查上游 latest → 以自有 tag `v{上游版本}-pf*` 判重 → clone 上游@tag → 组装 → `pnpm install/typecheck/test/build` → postprocess → zip+crx → 渲染 `templates/` 模板（updates.xml / release notes）→ `gh release create` → 部署 `updates.xml` 到 gh-pages。任一步失败即红。
 
 ## 测试
 
