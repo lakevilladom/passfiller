@@ -13,7 +13,6 @@
 | `overlay/` | PassFiller 功能代码（**纯新增文件**，组装时整棵复制进上游树，零冲突） |
 | `patches/` | 对上游的全部改动：**仅 2 个补丁 / 2 个文件 / 2 个 hunk** |
 | `scripts/` | 工具链（CI 与本地共用同一入口） |
-| `templates/` | CI 内容模板：`updates.xml` / `release-notes.md`（用 `{{KEY}}` 占位，由 `render-template.js` 渲染） |
 | `.github/workflows/sync-patch-build.yml` | 每 6h 轮询上游 + 手动触发；全链路验证后发布 |
 
 ### overlay/
@@ -37,8 +36,7 @@ overlay/
 |---|---|---|
 | `apply.js` | 组装：复制上游(LF 归一化) → 叠 overlay → 依次打补丁；`--materialize` 本地开发 | ✅ |
 | `postprocess.js` | 构建后处理：manifest 注入版本 `{上游版本}.{pf迭代}` / 改名 PassFiller / `optional_host_permissions`(回环) / `update_url` | ✅ |
-| `package-artifacts.js` | 零依赖打包：chrome-mv3 → zip + crx3(RSA 签名，含 appid 防错校验) | ✅ |
-| `render-template.js` | 极简 `{{KEY}}` 模板渲染：把模板渲染为产物文件（updates.xml / release notes） | ❌（CI 用） |
+| `package-artifacts.js` | 零依赖打包：chrome-mv3 → zip + crx3（RSA 签名，含 appid 防错校验） | ✅ |
 | `gen-patches.js` | 补丁失配修复：手工修复组装树后反向重新生成补丁（上游侧 LF 归一化后再 diff） | ❌ |
 
 > `git apply` 在本脚本中以 `GIT_CEILING_DIRECTORIES` 隔离仓库上下文——否则组装树被识别为仓库子目录时补丁会被**静默 Skip（退出码 0）**，产物缺功能。
@@ -96,7 +94,7 @@ node ../scripts/package-artifacts.js --dir .output/chrome-mv3 --zip out.zip --cr
    rm crx-private.pem
    ```
 
-> 扩展 ID 不写死：构建时由 `CRX_PRIVATE_KEY` 的公钥实时派生，自动注入 `updates.xml` 与 release notes。
+> 扩展 ID 不写死：构建时由 `CRX_PRIVATE_KEY` 的公钥实时派生，自动注入 `updates.xml`。
 
 ### 更换密钥
 
@@ -115,7 +113,7 @@ node ../scripts/package-artifacts.js --dir .output/chrome-mv3 --zip out.zip --cr
 
 ### CI 流程（sync-patch-build.yml）
 
-`gh api` 查上游 latest → 以自有 tag `v{上游版本}-pf*` 判重 → clone 上游@tag → 组装 → `pnpm install/typecheck/test/build` → postprocess → zip+crx → 渲染 `templates/` 模板（updates.xml / release notes）→ `gh release create` → 部署 `updates.xml` 到 gh-pages。任一步失败即红。
+`gh api` 查上游 latest → 以自有 tag `v{上游版本}-pf*` 判重 → clone 上游@tag → 组装 → `pnpm install/typecheck/test/build` → postprocess → zip+crx → `gh release create` → 部署 `updates.xml` 到 gh-pages。任一步失败即红。
 
 ## 测试
 

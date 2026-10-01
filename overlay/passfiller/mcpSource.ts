@@ -1,51 +1,28 @@
-// ============================================================================
-// MCP 凭据源 · 薄适配器（规范与接口的「扩展侧」实现）
-//
-// 通用设计：任何实现了下方线协议的 MCP HTTP 服务均可作为外部凭据源。
-//
-// 分工（最小侵入架构）：
-//   - 本模块只做三件事：配置读写、MCP JSON-RPC 调用、结果映射为扩展内部类型。
-//     无明文缓存、无业务逻辑（域名匹配 / 关键词过滤 / 解密 / 锁定语义全部在
-//     服务端实现，见协议注释）。
-//   - 唯一被门面（passfiller/index.ts）消费的接口（上游 messageRouter.ts 经
-//     import 改道间接使用；设置页 passfiller-options 直接读写配置）：
-//       queryExternalAccounts(domain, keyword?)  → 内联下拉元数据（绝不含密码）
-//       resolveExternalEntry(id)                 → FILL_BY_ID 按条目取明文（调服务端 get_entry）
-//       isMcpId(id)                              → id 命名空间路由
-//
-// 线协议（规范，服务端须实现同名工具；实际工具名 = `<前缀>_` + 工具名，前缀可配）：
-//   query_password { domain, keyword? }
-//     → { locked: true } | { found: false }
-//     | { found: true, entries: [{ id, title, username, url }] }   ← 不含 password
-//   get_entry { id }
-//     → { locked: true } | { found: false }
-//     | { found: true, entry: { id, title, username, password, url, totp? } }
-//
-// 安全边界：
-//   - API Key 存于 chrome.storage.local（本机、页面不可达）；调用走 Bearer；
-//   - query 响应不携带任何密码——明文仅在用户显式点击填充的那一次经 get_entry 下发；
-//   - 本模块零状态：MV3 Service Worker 随时被杀重启不影响填充链路。
-// ============================================================================
+// MCP 凭据源 · 薄适配器：配置读写 + JSON-RPC 调用 + 结果映射（无明文缓存/无业务逻辑）。
+// 供门面（index.ts）与设置页消费：
+//   queryExternalAccounts(domain, keyword?) → 内联下拉元数据（绝不含密码）
+//   resolveExternalEntry(id)                 → 按条目取明文（调服务端 get_entry）
+//   isMcpId(id)                              → 命名空间路由
+// 线协议（服务端工具，实际名 = `<前缀>_<工具名>`）：
+//   query_password {domain,keyword?} → entries（不含 password）｜ {locked}｜{found:false}
+//   get_entry {id}            → entry（含 password）｜ {locked}｜{found:false}
+// 安全边界：API Key 存 chrome.storage.local，走 Bearer；query 不携密码；零状态抗 SW 重启。
 
 import { logger } from '@/utils/logger';
 import { fetchFaviconDataUrl } from '@/utils/favicon';
 import type { MatchingAccountMeta, PasswordEntry } from '@/utils/types';
 
-/** MCP 条目 id 前缀：与本地 vault 条目 id 命名空间隔离，getDecryptedEntryById 据此路由 */
+/** MCP 条目 id 前缀，与本地 vault id 命名空间隔离，供路由 */
 export const MCP_SOURCE_PREFIX = 'mcp:';
 
 /** chrome.storage.local 中的配置键 */
 export const MCP_CONFIG_STORAGE_KEY = 'mcp_source_config';
 
 export interface McpSourceConfig {
-  /** 是否启用 MCP 凭据源（默认关闭，避免无谓的网络探测） */
-  enabled: boolean;
-  /** MCP 服务端点（协议 + host + port + 路径，如 https://mcp.example.com/mcp） */
-  endpoint: string;
-  /** 服务端签发的 API Key */
-  apiKey: string;
-  /** 工具名前缀：实际调用 `<前缀>_query_password` / `<前缀>_get_entry`；空串 = 用工具原名 */
-  toolPrefix: string;
+  enabled: boolean;   // 是否启用（默认关闭，避免无谓网络探测）
+  endpoint: string;   // 服务端点，如 https://mcp.example.com/mcp
+  apiKey: string;     // 服务端签发 API Key
+  toolPrefix: string; // 工具名前缀：实际调用 `<前缀>_query_password`；空串 = 原名
 }
 
 const DEFAULT_CONFIG: McpSourceConfig = {
@@ -68,11 +45,7 @@ export async function setMcpConfig(patch: Partial<McpSourceConfig>): Promise<voi
   await chrome.storage.local.set({ [MCP_CONFIG_STORAGE_KEY]: { ...current, ...patch } });
 }
 
-/**
- * 判断 endpoint 是否落在回环（127.0.0.1 / localhost）。
- * 回环不在 <all_urls> 覆盖范围，需经 optional_host_permissions 现场申请；
- * 远程端点由 <all_urls> 覆盖，无需申请。
- */
+// 回环（127.0.0.1/localhost）不在 <all_urls> 覆盖，需 optional_host_permissions 现场申请。
 export function isLoopbackEndpoint(endpoint: string): boolean {
   try {
     const host = new URL(endpoint).hostname.toLowerCase();
@@ -82,11 +55,7 @@ export function isLoopbackEndpoint(endpoint: string): boolean {
   }
 }
 
-/**
- * 为本机 MCP endpoint 现场申请回环权限（必须在用户手势中调用，如弹窗按钮点击）。
- * request 幂等：已授权时立即返回 true、无弹窗；用户拒绝或关闭返回 false。
- * 远程 endpoint 直接放行。
- */
+// 现场申请回环权限（须用户手势触发）；已授权幂等返回 true，拒绝返回 false。远程端点直接放行。
 export async function ensureMcpPermission(endpoint: string): Promise<{ ok: true } | { ok: false; message: string }> {
   if (!isLoopbackEndpoint(endpoint)) return { ok: true };
   const origin = `http://${new URL(endpoint).hostname}/*`;
@@ -105,10 +74,7 @@ export function isMcpId(id: string): boolean {
   return id.startsWith(MCP_SOURCE_PREFIX);
 }
 
-/**
- * 解析「MCP 服务地址」粘贴内容（https://mcp.example.com/mcp?key=xxx）
- * @returns 解析出的 endpoint / apiKey；格式无效或缺 key 时返回 null
- */
+// 解析「MCP 服务地址」粘贴内容（https://mcp.example.com/mcp?key=xxx）；格式无效或缺 key 返回 null。
 export function parseMcpUrl(input: string): { endpoint: string; apiKey: string } | null {
   try {
     const url = new URL(input.trim());
@@ -135,7 +101,7 @@ async function callMcpTool(cfg: McpSourceConfig, tool: string, args: Record<stri
   const toolName = cfg.toolPrefix ? `${cfg.toolPrefix}_${tool}` : tool;
   let response: Response;
   try {
-    // 10s 超时：挂死的服务端不能拖住内联下拉（Chrome 103+ 支持 AbortSignal.timeout）
+    // 10s 超时：挂死的服务端不能拖住内联下拉
     response = await fetch(cfg.endpoint, {
       method: 'POST',
       headers: {
@@ -151,7 +117,7 @@ async function callMcpTool(cfg: McpSourceConfig, tool: string, args: Record<stri
       signal: AbortSignal.timeout(10_000),
     });
   } catch (error) {
-    // 网络层失败：服务未运行 / 端口不通 / 防火墙拦截
+    // 网络层失败
     const msg = error instanceof Error ? error.message : String(error);
     return { ok: false, message: `无法连接 MCP 服务（${msg}）` };
   }
@@ -161,7 +127,7 @@ async function callMcpTool(cfg: McpSourceConfig, tool: string, args: Record<stri
   const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!json) return { ok: false, message: 'MCP 服务响应解析失败' };
 
-  // 框架层错误（-32602 未找到工具：服务端插件未安装/被禁用；-32000 未能就绪 等）
+  // 框架层错误
   const errObj = json.error as McpContent | undefined;
   if (errObj) return { ok: false, message: String(errObj.message ?? 'MCP 框架错误') };
 
@@ -176,7 +142,7 @@ async function callMcpTool(cfg: McpSourceConfig, tool: string, args: Record<stri
       const parsed = JSON.parse(content[0].text as string);
       if (parsed && typeof parsed === 'object') return { ok: true, content: parsed as McpContent };
     } catch {
-      // 落入下方「缺少有效内容」
+      // 解析失败，落入下方「缺少有效内容」
     }
   }
   return { ok: false, message: 'MCP 服务响应缺少有效内容' };
@@ -185,18 +151,11 @@ async function callMcpTool(cfg: McpSourceConfig, tool: string, args: Record<stri
 // ==================== 供门面（passfiller/index.ts）消费的接缝 ====================
 
 export interface ExternalAccountsResult {
-  /** 已映射为 MatchingAccountMeta 的 MCP 条目（id 带 mcp: 前缀，绝不含密码） */
-  metas: MatchingAccountMeta[];
-  /** MCP 源是否启用（false = 未启用/读取失败；启用但锁定/出错/无匹配均为 true，非阻断） */
-  available: boolean;
+  metas: MatchingAccountMeta[]; // 已映射的内联下拉元数据（id 带 mcp: 前缀，绝不含密码）
+  available: boolean;           // 源是否启用（连接错/锁定/无匹配皆 true，非阻断）
 }
 
-/**
- * 按域名（+可选关键词）查询服务端 query_password，映射为内联下拉元数据。
- *
- * 关键词过滤在服务端完成（协议参数 keyword），本模块不做二次过滤；
- * 所有失败路径（连接错/锁定/无匹配）一律返回空 metas 且不抛出，本地 vault 流程照常。
- */
+// 按域名（+可选关键词）查询服务端 query_password，映射为内联下拉元数据；失败一律返回空 metas 且不抛出。
 export async function queryExternalAccounts(domain: string, keyword?: string): Promise<ExternalAccountsResult> {
   const cfg = await getMcpConfig().catch(() => null);
   if (!cfg || !cfg.enabled) return { metas: [], available: false };
@@ -232,12 +191,7 @@ export async function queryExternalAccounts(domain: string, keyword?: string): P
   return { metas, available: true };
 }
 
-/**
- * FILL_BY_ID 接缝：按 `mcp:<id>` 调服务端 get_entry 取单条明文。
- *
- * 不依赖本地会话（用户可能只用外部源、不配置本地 vault）；
- * 服务端锁定 / 条目不存在 / 连接失败均返回 null，由调用方按「会话已锁定或不存在」处理。
- */
+// FILL_BY_ID 接缝：按 `mcp:<id>` 调服务端 get_entry 取单条明文；锁定/不存在/失败返回 null。
 export async function resolveExternalEntry(fullId: string): Promise<PasswordEntry | null> {
   const cfg = await getMcpConfig().catch(() => null);
   if (!cfg?.enabled) return null;
@@ -272,10 +226,7 @@ export async function resolveExternalEntry(fullId: string): Promise<PasswordEntr
 
 export type McpTestStatus = { kind: 'ok' } | { kind: 'locked' } | { kind: 'error'; message: string };
 
-/**
- * 用（可能尚未保存的）配置测试连通性：哨兵域名落在 found/notFound 均代表
- * 「服务可达且已解锁」；locked = 可达未解锁；error = 连不通（未运行/端口/密钥）。
- */
+// 用（可能尚未保存的）配置测试连通性：found/notFound = 可达已解锁；locked = 可达未解锁；error = 连不通。
 export async function testMcpConfig(cfg: McpSourceConfig): Promise<McpTestStatus> {
   const res = await callMcpTool(cfg, 'query_password', { domain: '__connection_test__' });
   if (!res.ok) return { kind: 'error', message: res.message };

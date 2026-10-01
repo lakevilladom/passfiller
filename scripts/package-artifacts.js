@@ -1,24 +1,7 @@
 #!/usr/bin/env node
-// ============================================================================
-// package-artifacts.js — 零依赖打包器：chrome-mv3 目录 → zip + crx3
-//
-// 为什么不用现成工具：
-//   - `wxt zip` 会隐式重新构建，覆盖 postprocess.js 对 manifest 的修改
-//     （版本号/PassFiller 改名/optional_host_permissions/update_url），故弃用；
-//   - npm 上的 crx3 打包包多年未维护，Node 24 下直接崩溃，故按 Chromium
-//     crx_file 规范自实现（components/crx_file/crx3.proto + crx_creator.cc）。
-//
-// 用法：
-//   node scripts/package-artifacts.js --dir .output/chrome-mv3 --zip out.zip \
-//        [--crx out.crx --key private.pem [--appid <32位扩展ID>]]
-//
-// zip：deflate 压缩，文件路径用正斜杠，时间戳固定（可重现构建）；
-// crx3 = "Cr24" + LE32(3) + LE32(headerLen) + protobuf 头 + zip 字节。
-//   header = CrxFileHeader{ sha256_with_rsa: [proof], signed_header_data: [sd] }
-//   proof  = AsymmetricKeyProof{ sha256_hash: SHA256(sd), signature: RSA 签名 }
-//   sd     = SignedData{ crx_id: SHA256(公钥 DER) 前 16 字节 }
-//   签名输入 = "CRX3 Signed Data" + 0x00 + LE32(headerLen) + sd
-// ============================================================================
+// package-artifacts.js — 零依赖打包：chrome-mv3 → zip + crx3（按 Chromium crx3 规范自实现）。
+// 不用 wxt zip（隐式 rebuild 覆盖 postprocess 的 manifest）；不用弃维护的 npm crx3 包（Node 24 崩溃）。
+// 用法: node scripts/package-artifacts.js --dir <chrome-mv3> [--zip out.zip] [--crx out.crx --key key.pem [--appid <32位ID>]]
 
 import { parseArgs } from 'node:util';
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -140,14 +123,11 @@ function bytesField(fieldNum, payload) {
 
 const ID_ALPHABET = 'abcdefghijklmnop';
 
-/**
- * crx3 结构（components/crx_file/crx3.proto）：
- *   prefix = "Cr24" + LE32(3) + LE32(headerLen)
- *   header = CrxFileHeader{ sha256_with_rsa = 2: [proof], signed_header_data = 10000: sd }
- *   proof  = AsymmetricKeyProof{ public_key = 1: SPKI DER, signature = 2 }
- *   sd     = SignedData{ crx_id = 1: SHA256(公钥) 前 16 字节 }
- *   签名输入 = "CRX3 SignedData" + 0x00 + LE32(len(sd)) + sd + archive（RSA PKCS#1 v1.5 SHA-256）
- */
+// crx3 = "Cr24" + LE32(3) + LE32(headerLen) + protobuf 头 + zip
+//   header = { sha256_with_rsa: [proof], signed_header_data: sd }
+//   proof  = { public_key: SPKI DER, signature }
+//   sd     = { crx_id: SHA256(公钥) 前 16 字节 }
+//   签名输入 = "CRX3 SignedData" + 0x00 + LE32(len(sd)) + sd + archive（RSA PKCS#1 v1.5 SHA-256）
 function buildCrx3(zipBuf, privateKeyPem) {
   const privateKey = createPrivateKey(privateKeyPem);
   const pubDer = createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
@@ -163,7 +143,7 @@ function buildCrx3(zipBuf, privateKeyPem) {
   // SignedData{ crx_id = 1 }：16 字节原始二进制
   const signedData = bytesField(1, crxIdBytes);
 
-  // 签名输入（proto 注释原文）："CRX3 SignedData\x00" + LE32(len(signed_header_data)) + signed_header_data + archive
+  // 签名输入 = "CRX3 SignedData\x00" + LE32(len(sd)) + sd + archive
   const sizeField = Buffer.alloc(4);
   sizeField.writeUInt32LE(signedData.length, 0);
   const toSign = Buffer.concat([
